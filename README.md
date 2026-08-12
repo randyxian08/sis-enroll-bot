@@ -1,6 +1,12 @@
-# SIS Enroll Bot — HKU 选课自动报名机器人
+# SIS Enroll Bot — HKU 选课机器人
 
-在选课开放瞬间自动完成 PeopleSoft SIS 的报名提交。面向 `sis-main.hku.hk`（Enrollment Shopping Cart / `SSR_SSENRL_CART`）。
+两个引擎，一个面板：
+
+- **抢课**：选课开放瞬间自动完成报名提交（Enrollment Shopping Cart）。
+- **捡漏**：add/drop 期间蹲守满员课程，有人退课出现空位时立即自动提交（Enrollment Add Classes）。
+- **可视化面板**：注入后页面右下角出现控制面板，点按钮即可操作，不用碰命令行。
+
+面向 `sis-main.hku.hk`（PeopleSoft SIS）。新手请直接看 [使用教程](TUTORIAL.md)。
 
 > ⚠️ 仅供学习与研究浏览器自动化、PeopleSoft 协议使用。使用本工具可能违反学校系统的使用条款，风险自负。
 
@@ -14,6 +20,8 @@ Select Term → 选课车（Step 1）→ Proceed to Step 2（Confirm classes）�
 
 整条流程 2~3 个 POST，开窗后约 0.1~0.5 秒完成。人工操作需要两次点击和约 40 秒的加载等待。
 
+捡漏模式同样走表单重放，只是目标换成 Add Classes 页：每轮轮询读取 Temporary Course List 里目标课的 Open/Closed 状态，出现 Open 立即 Proceed to Step 2 → Finish Enrolling。同一学期的所有目标共享一次页面加载，监控 10 门课和 1 门课的网络开销相同。
+
 ## 延迟优化
 
 | 优化 | 术语 | 收益 |
@@ -24,51 +32,71 @@ Select Term → 选课车（Step 1）→ Proceed to Step 2（Confirm classes）�
 | 开窗前 60ms 投机式发射，失败后每 300ms 重试 | Speculative firing、lead time、fixed-interval retry | 补偿 RTT，容忍服务器晚开 |
 | 粗等待 → 细轮询 → 末 20ms 自旋的调度器 | Precision scheduling、spin-wait | 消除 setTimeout 钳制误差 |
 | 后台节流侦测与告警 | Timer throttling detection | 防止标签页在后台时定时器被钳制到 1s 以上 |
+| 捡漏轮询加 ±20% 随机抖动 | Jitter | 请求间隔不规律，避免被当成机械流量 |
 
-## 用法
+## 快速上手
 
-机器人通过 [Kimi WebBridge](http://127.0.0.1:10086) 注入到已登录的 SIS 页面。也可以把 `enroll-bot.js` 全文粘贴到浏览器控制台，然后直接调用 `window.__enrollBot`。
+机器人通过 [Kimi WebBridge](http://127.0.0.1:10086) 注入到已登录的 SIS 页面。详细安装步骤见 [TUTORIAL.md](TUTORIAL.md)。
+
+### 抢课（选课开放日）
 
 ```bash
-# 1. 在浏览器登录 SIS，打开 Enrollment Add Classes 页面
-# 2. 把要报的课提前加进 Temporary Course List（选课车，Sem 1 与 Sem 2 各自独立）
-# 3. 注入机器人
-./sis-bot.sh inject
-
-# 4. 演练（不提交，只验证流程；封窗期预期返回 blocked:true）
-./sis-bot.sh dryrun
-
-# 5. 启动定时报名（Sem 1 于 10:00 开放，Sem 2 于 10:10 开放）
+./sis-bot.sh nav cart        # 打开选课车页面（课程提前加进 Temporary Course List）
+./sis-bot.sh inject          # 注入抢课引擎 + 面板
+./sis-bot.sh dryrun          # 演练：验证流程，封窗期预期返回 blocked:true
 ./sis-bot.sh start "2026-08-18T10:00:00+08:00" "2026-08-18T10:10:00+08:00"
-
-# 查看日志、停止
-./sis-bot.sh status
-./sis-bot.sh stop
+./sis-bot.sh status          # 看日志
+./sis-bot.sh stop            # 停止
 ```
 
-也可以在控制台直接调用：
+### 捡漏（add/drop 期间）
+
+```bash
+./sis-bot.sh nav add                    # 打开 Enrollment: Add Classes 页面
+./sis-bot.sh inject-snipe               # 注入捡漏引擎 + 面板
+./sis-bot.sh check "12345,1 23456,2"    # 查一次状态（1=Sem 1，2=Sem 2）
+./sis-bot.sh snipe "12345,1 23456,2" 5000   # 开始蹲守，间隔 5 秒
+./sis-bot.sh snipe-status               # 看日志
+./sis-bot.sh snipe-stop                 # 停止
+```
+
+课号（Class Nbr，4-5 位数字）在 Class Search 搜索结果或个人课表里查。也可以在控制台直接调用：
 
 ```js
-window.__enrollBot.start({rounds:[
-  {openTime:"2026-08-18T10:00:00+08:00", term:0},  // term: 0 表示 Sem 1
-  {openTime:"2026-08-18T10:10:00+08:00", term:1},  //        1 表示 Sem 2
-]});
+window.__snipeBot.start({
+  targets: [{ nbr: "12345", term: 0 }],  // term: 0 表示 Sem 1，1 表示 Sem 2
+  intervalMs: 5000,
+});
 ```
+
+### 可视化面板
+
+`inject` 或 `inject-snipe` 都会同时注入面板（`panel.js`）。页面右下角出现悬浮卡片：
+
+- 「抢课」页签：设置两个学期的开闸时间，一键演练/开始/停止；
+- 「捡漏」页签：填写目标课号列表，一键查状态/蹲守/停止；
+- 「日志」页签：两个引擎的实时日志合并显示，可复制。
+
+配置存在 `localStorage`，刷新页面不丢。面板可拖拽、可折叠。
 
 ## 运行前提
 
-- 课程已提前放入对应学期的 Temporary Course List（加入选课车不受时间窗限制）。
+- 课程已提前放入对应学期的 Temporary Course List（加入选课车不受时间窗限制）；捡漏模式会自动把目标课号 Enter 进列表。
 - 保持标签页前台可见、电脑不休眠。后台标签页的定时器会被浏览器钳制。
-- 登录态有效。机器人每 15 秒预热一次连接，同时起到保活作用。
+- 登录态有效。抢课引擎每 15 秒预热一次连接，捡漏引擎的轮询本身即保活。
 
 ## 行为细节
 
 - 按钮不写死 ID。PeopleSoft 的 ICAction 后缀（如 `$82$`）会变，机器人按按钮文字和 ID 前缀双重匹配（「Proceed to Step 2 of 3」「Enroll」「Finish Enrolling」）。
 - 每轮结束后解析 View results 页每门课的 success/error 图标，并写入日志。
 - 服务器返回封窗提示（`outside course selection period`）时每 300ms 重试一次，重试窗口最长 120 秒。
-- 运行状态写入 `document.title`，完整日志可通过 `window.__enrollBot.getLogs()` 读取。
+- 捡漏状态判定读表格行内的 Open/Closed/Wait List 图标与文本，识别不出时按 unknown 处理并记录该行原文，不会误提交。
+- 运行状态写入 `document.title`，完整日志可通过 `window.__enrollBot.getLogs()` / `window.__snipeBot.getLogs()` 读取。
 
 ## 文件
 
-- `enroll-bot.js`：机器人本体，注入页面运行。
-- `sis-bot.sh`：WebBridge 启动器，子命令为 inject、dryrun、start、status、stop。
+- `enroll-bot.js`：抢课引擎，注入选课车页面。
+- `snipe-bot.js`：捡漏引擎，注入 Add Classes 页面。
+- `panel.js`：可视化控制面板，随任一引擎注入。
+- `sis-bot.sh`：WebBridge 启动器，子命令见上文。
+- `TUTORIAL.md`：从零开始的完整教程。
