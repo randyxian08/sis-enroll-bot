@@ -46,6 +46,7 @@
     .btns { display: flex; gap: 6px; margin-top: 4px; }
     .btns button { flex: 1; border: none; border-radius: 8px; padding: 8px 0; font-size: 13px; cursor: pointer; }
     .go { background: #0a84ff; color: #fff; } .go:hover { background: #0070e0; }
+    button:disabled { opacity: .35; cursor: not-allowed; }
     .ghost { background: #3a3a3c; color: #f2f2f7; } .ghost:hover { background: #48484a; }
     .stop { background: #ff453a; color: #fff; }
     .hint { color: #636366; font-size: 11px; margin-top: 8px; line-height: 1.5; }
@@ -118,6 +119,7 @@
         <div class="hint">到点自动：对表 → 预热连接 → 预封装请求 → 毫秒级提交。<br>Sem 1 成功后自动接 Sem 2。期间保持本标签页前台。</div>`;
       $('#t1').onchange = (e) => { cfg.sem1 = e.target.value; save(); };
       $('#t2').onchange = (e) => { cfg.sem2 = e.target.value; save(); };
+      if (!window.__enrollBot) { bd.querySelectorAll('.btns button').forEach((b) => { b.disabled = true; }); return; }
       $('#dry').onclick = async () => { $('#st').textContent = '演练中…'; const r = await window.__enrollBot.dryRun(); $('#st').textContent = JSON.stringify(r); };
       $('#start').onclick = () => {
         const iso = (v) => new Date(v).toISOString();
@@ -148,6 +150,7 @@
         .filter((t) => /^\d{3,6}$/.test(t.nbr));
       $('#targets').oninput = (e) => { cfg.snipeTargets = e.target.value; save(); };
       $('#iv').onchange = (e) => { cfg.intervalMs = +e.target.value; save(); };
+      if (!window.__snipeBot) { bd.querySelectorAll('.btns button').forEach((b) => { b.disabled = true; }); return; }
       $('#chk').onclick = async () => {
         $('#st').textContent = '查询中…';
         const r = await window.__snipeBot.check({ targets: readTargets() });
@@ -202,11 +205,15 @@
     };
   });
 
-  // ---------- 状态灯 ----------
+  // ---------- 状态灯 + 引擎版本标签（每秒刷新，引擎后注入也能识别）----------
   setInterval(() => {
     const busy = (window.__snipeBot && window.__snipeBot.isRunning && window.__snipeBot.isRunning());
     const last = (window.__enrollBot && window.__enrollBot.lastLog || '') + (window.__snipeBot && window.__snipeBot.lastLog || '');
     dot.className = 'dot' + (busy ? ' busy' : (last ? ' on' : ''));
+    $('#ver').textContent =
+      (window.__enrollBot ? '抢课v' + window.__enrollBot.__v : '') +
+      (window.__enrollBot && window.__snipeBot ? ' · ' : '') +
+      (window.__snipeBot ? '捡漏v' + window.__snipeBot.__v : '') || '引擎未加载';
   }, 1000);
 
   views.rush();

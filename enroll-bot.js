@@ -8,7 +8,7 @@
 // 设计：解析全部走 DOM（PeopleSoft 页面结构稳定，DOM 最不容易踩边界）；
 //       优化全在调度与网络层：亚秒时钟同步、连接池预热、请求体预封装、自旋精确定时。
 (function () {
-  if (window.__enrollBot && window.__enrollBot.__v === 8) return;
+  if (window.__enrollBot && window.__enrollBot.__v === 9) return;
 
   const frame = () => document.querySelector('#ptifrmtgtframe');
   const idoc = () => frame().contentDocument;
@@ -99,9 +99,14 @@
   }
 
   // ---------- 精度调度器：粗等待 → 细轮询 → 末 20ms 自旋 ----------
+  // 粗等待阶段每 30s 检查一次停止标志，保证 stop() 能及时生效
   async function sleepUntil(clientTs) {
     let d = clientTs - Date.now();
-    while (d > 500) { await new Promise((r) => setTimeout(r, Math.min(d - 300, 30000))); d = clientTs - Date.now(); }
+    while (d > 500) {
+      if (!running) return;
+      await new Promise((r) => setTimeout(r, Math.min(d - 300, 30000)));
+      d = clientTs - Date.now();
+    }
     while (d > 20) { await new Promise((r) => setTimeout(r, 10)); d = clientTs - Date.now(); }
     while (Date.now() < clientTs) { /* spin */ }
   }
@@ -198,7 +203,7 @@
   let running = false;
 
   window.__enrollBot = {
-    __v: 8,
+    __v: 9,
     lastLog: '',
     getLogs: () => logs.slice(),
     async warmup() { await warmPool(1); },
@@ -294,5 +299,5 @@
     },
     stop() { running = false; log('手动停止'); },
   };
-  log('enroll-bot v5 已加载');
+  log('enroll-bot v9 已加载');
 })();
