@@ -20,6 +20,8 @@ Select Term → 选课车（Step 1）→ Proceed to Step 2（Confirm classes）�
 
 整条流程 2~3 个 POST，开窗后约 0.1~0.5 秒完成。人工操作需要两次点击和约 40 秒的加载等待。
 
+多个轮次（Sem 1、Sem 2）**并发执行**：每轮独立对表、独立预热、独立开火、独立重试。两个学期同时开闸时互不等待；学期选择通过覆盖提交参数实现，不触碰共享 DOM，并发时不会串台。
+
 捡漏模式同样走表单重放，只是目标换成 Add Classes 页：每轮轮询读取 Temporary Course List 里目标课的 Open/Closed 状态，出现 Open 立即 Proceed to Step 2 → Finish Enrolling。同一学期的所有目标共享一次页面加载，监控 10 门课和 1 门课的网络开销相同。
 
 ## 延迟优化

@@ -8,7 +8,7 @@
 // 设计：解析全部走 DOM（PeopleSoft 页面结构稳定，DOM 最不容易踩边界）；
 //       优化全在调度与网络层：亚秒时钟同步、连接池预热、请求体预封装、自旋精确定时。
 (function () {
-  if (window.__enrollBot && window.__enrollBot.__v === 7) return;
+  if (window.__enrollBot && window.__enrollBot.__v === 8) return;
 
   const frame = () => document.querySelector('#ptifrmtgtframe');
   const idoc = () => frame().contentDocument;
@@ -50,9 +50,15 @@
     return { url: form.action, body: p.toString() };
   }
 
-  async function post(doc, action) {
+  async function post(doc, action, extra) {
     const { url, body } = formParams(doc, action);
-    const r = await rawPost(url, body);
+    let finalBody = body;
+    if (extra) {
+      const p = new URLSearchParams(body);
+      for (const [k, v] of Object.entries(extra)) p.set(k, v);
+      finalBody = p.toString();
+    }
+    const r = await rawPost(url, finalBody);
     log(`POST ${action} -> ${r.resp.status} ${r.ms}ms`);
     return new DOMParser().parseFromString(r.html, 'text/html');
   }
@@ -133,26 +139,25 @@
 
   // 确保在指定学期的选课车页（term: 0=Sem1, 1=Sem2）
   // 覆盖三种起始状态：已是该车 / 在 Select Term 页 / 在另一学期的车
+  // 注意：学期选择不改共享 DOM（并发轮次会串台），而是直接覆盖提交参数
   async function ensureTerm(doc, termIdx) {
     const want = termIdx === 1 ? 'Sem 2' : 'Sem 1';
     if (pageText(doc).includes('2026-27 ' + want + ' |')) return doc;
 
-    const radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
+    let radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
     if (!radios.length) {
       // 不在 Select Term 页 → 先点 Change Term 过去
       log('切换学期到', want);
       const change = findAction(doc, /change term/i, 'DERIVED_SSS_SCT_SSS_TERM_LINK');
       if (!change) throw new Error('没找到 Change Term 按钮，当前页面: ' + pageText(doc).slice(0, 150));
       doc = await post(doc, change);
+      radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
     }
-    const radios2 = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
-    if (!radios2.length) throw new Error('Select Term 页没找到学期选项');
+    if (!radios.length) throw new Error('Select Term 页没找到学期选项');
     log('选择', want);
-    // FormData 只收 checked 的 radio —— 直接在 DOM 上勾
-    radios2.forEach((r, i) => { r.checked = (i === termIdx); });
     const cont = findAction(doc, /continue/i, 'DERIVED_SSS_SCT_SSR_PB_GO');
     if (!cont) throw new Error('Select Term 页没找到 Continue');
-    doc = await post(doc, cont);
+    doc = await post(doc, cont, { 'SSR_DUMMY_RECV1$sels$0': radios[termIdx].value });
     if (!pageText(doc).includes('2026-27 ' + want + ' |')) throw new Error('选学期后页面不符: ' + pageText(doc).slice(0, 150));
     return doc;
   }
@@ -193,7 +198,7 @@
   let running = false;
 
   window.__enrollBot = {
-    __v: 7,
+    __v: 8,
     lastLog: '',
     getLogs: () => logs.slice(),
     async warmup() { await warmPool(1); },
@@ -220,15 +225,14 @@
       const offset = sync.offset;
       log(`时钟偏差 ${Math.round(offset)}ms (精度 ±${Math.round(sync.accuracy)}ms, ${sync.samples || 0} 样本)`);
       const warmTimer = setInterval(() => this.warmup(), 15000);
-      const allResults = [];
 
-      for (let i = 0; i < rounds.length; i++) {
-        const round = rounds[i];
+      // 每轮独立调度、独立开火，全部并发——同时开闸的学期互不等待
+      const runRound = async (round, i) => {
         const T = new Date(round.openTime).getTime();
-        if (isNaN(T)) { log(`第 ${i + 1} 轮 openTime 无效，跳过`); continue; }
+        if (isNaN(T)) { log(`第 ${i + 1} 轮 openTime 无效，跳过`); return { round: i + 1, error: 'invalid openTime' }; }
 
         await sleepUntil(T - offset - 30000);
-        if (!running) break;
+        if (!running) return { round: i + 1, error: 'stopped' };
         await warmPool(3);
         log(`第 ${i + 1} 轮连接池已预热`);
 
@@ -245,17 +249,17 @@
           } else {
             log(`第 ${i + 1} 轮预封装没找到 Enroll 按钮（车为空？），开火时实时找`);
           }
-        } catch (e) { log('预封装失败(不致命):', e.message); }
+        } catch (e) { log(`第 ${i + 1} 轮预封装失败(不致命):`, e.message); }
         await warmPool(3);
 
         const fireAt = T - offset - 60;
         log(`第 ${i + 1} 轮 (term=${round.term || 0}) 目标 ${new Date(T).toISOString()}，等待 ${Math.round((fireAt - Date.now()) / 1000)}s`);
         await sleepUntil(fireAt);
-        if (!running) break;
+        if (!running) return { round: i + 1, error: 'stopped' };
 
         const deadline = Date.now() + (round.retryWindowMs || 120000);
-        let attempt = 0, done = false;
-        while (Date.now() < deadline && running && !done) {
+        let attempt = 0;
+        while (Date.now() < deadline && running) {
           attempt++;
           try {
             const r = await fireRound(round, attempt === 1 ? prepared : null);
@@ -264,8 +268,6 @@
               await new Promise((r2) => setTimeout(r2, 300));
               continue;
             }
-            done = true;
-            allResults.push({ round: i + 1, ...r });
             if (r.done) {
               const ok = r.results.rows.filter((x) => x.status.includes('success')).length;
               const err = r.results.rows.filter((x) => x.status.includes('error')).length;
@@ -273,13 +275,17 @@
             } else {
               log(`第 ${i + 1} 轮异常:`, JSON.stringify(r).slice(0, 300));
             }
+            return { round: i + 1, ...r };
           } catch (e) {
             log(`第 ${i + 1} 轮第 ${attempt} 次出错:`, e.message, '— 800ms 后重试');
             await new Promise((r2) => setTimeout(r2, 800));
           }
         }
-        if (!done) log(`第 ${i + 1} 轮超过重试窗口仍未成功`);
-      }
+        if (running) log(`第 ${i + 1} 轮超过重试窗口仍未成功`);
+        return { round: i + 1, error: 'retry window expired' };
+      };
+
+      const allResults = await Promise.all(rounds.map((round, i) => runRound(round, i)));
       clearInterval(warmTimer);
       stopDetect();
       running = false;
