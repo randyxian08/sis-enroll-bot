@@ -10,6 +10,16 @@
 
 > ⚠️ 仅供学习与研究浏览器自动化、PeopleSoft 协议使用。使用本工具可能违反学校系统的使用条款，风险自负。
 
+## 合规与风险
+
+对照 HKU 成文规定逐条核过：
+
+- [Campus Network Acceptable Use Policy](https://its.hku.hk/policies/campus-network-acceptable-use-policy/) 禁止的是扫描、入侵、拖垮带宽——机器人用自己的登录态、发与手动一致的请求、总量十几个，均不涉及；
+- Statement of Ethics on Computer Use 管的是未授权访问与干扰系统，同样不涉及；
+- 各学院选课规程只讲流程，无任何条文禁止「自动化自己的选课操作」。
+
+没有明文禁止 ≠ 学校认可。实际风险排序：长时间高频轮询触发 WAF 临时封 IP > 学校升级风控 > 纪律处分（无先例）。降险建议：抢完即停、捡漏间隔 ≥ 5 秒、低调使用。
+
 ## 原理
 
 PeopleSoft 没有独立的「选课 API」：所有操作都向同一个 `.GBL` 表单地址提交 POST，靠 `ICAction` 字段区分动作。机器人跳过「点按钮 → 等渲染 → 再点按钮」的人工流程，在页面上下文里直接用 `fetch` 重放表单提交：
@@ -91,7 +101,7 @@ window.__snipeBot.start({
 
 - 按钮不写死 ID。PeopleSoft 的 ICAction 后缀（如 `$82$`）会变，机器人按按钮文字和 ID 前缀双重匹配（「Proceed to Step 2 of 3」「Enroll」「Finish Enrolling」）。
 - 每轮结束后解析 View results 页每门课的 success/error 图标，并写入日志。
-- 服务器返回封窗提示（`outside course selection period`）时每 300ms 重试一次，重试窗口最长 120 秒。
+- 开火后**任何非成功响应**（封窗提示、未识别文案、异常页）都会持续重试：封窗提示每 300ms 一发，其余 800ms 一发，直到重试窗口结束——**服务器晚开（如 10:01 才开放）也能捕捉**。窗口默认 120 秒，面板「重试窗口」可调大（担心晚开更久就设 300）。
 - 捡漏状态判定读表格行内的 Open/Closed/Wait List 图标与文本，识别不出时按 unknown 处理并记录该行原文，不会误提交。
 - 运行状态写入 `document.title`，完整日志可通过 `window.__enrollBot.getLogs()` / `window.__snipeBot.getLogs()` 读取。
 
