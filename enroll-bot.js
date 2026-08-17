@@ -8,7 +8,7 @@
 // 设计：解析全部走 DOM（PeopleSoft 页面结构稳定，DOM 最不容易踩边界）；
 //       优化全在调度与网络层：亚秒时钟同步、连接池预热、请求体预封装、自旋精确定时。
 (function () {
-  if (window.__enrollBot && window.__enrollBot.__v === 9) return;
+  if (window.__enrollBot && window.__enrollBot.__v === 10) return;
 
   const frame = () => document.querySelector('#ptifrmtgtframe');
   const idoc = () => frame().contentDocument;
@@ -203,7 +203,7 @@
   let running = false;
 
   window.__enrollBot = {
-    __v: 9,
+    __v: 10,
     lastLog: '',
     getLogs: () => logs.slice(),
     async warmup() { await warmPool(1); },
@@ -262,25 +262,22 @@
         await sleepUntil(fireAt);
         if (!running) return { round: i + 1, error: 'stopped' };
 
-        const deadline = Date.now() + (round.retryWindowMs || 120000);
+        const deadline = Date.now() + (round.retryWindowMs || 120000); // 开火后持续重试：捕捉服务器晚开（如 10:01 才开放）
         let attempt = 0;
         while (Date.now() < deadline && running) {
           attempt++;
           try {
             const r = await fireRound(round, attempt === 1 ? prepared : null);
-            if (r.blocked) {
-              log(`第 ${i + 1} 轮第 ${attempt} 次 blocked，300ms 后重试`);
-              await new Promise((r2) => setTimeout(r2, 300));
-              continue;
-            }
             if (r.done) {
               const ok = r.results.rows.filter((x) => x.status.includes('success')).length;
               const err = r.results.rows.filter((x) => x.status.includes('error')).length;
               log(`第 ${i + 1} 轮完成! 开窗后 ${((Date.now() + offset) - T) / 1000}s 搞定。成功 ${ok} 门, 失败 ${err} 门`, JSON.stringify(r.results.rows).slice(0, 400));
-            } else {
-              log(`第 ${i + 1} 轮异常:`, JSON.stringify(r).slice(0, 300));
+              return { round: i + 1, ...r };
             }
-            return { round: i + 1, ...r };
+            // blocked / 未识别文案 / 异常页：一律继续重试直到窗口结束，服务器晚开也能捕捉
+            const why = r.blocked ? 'blocked' : (r.error ? r.error : 'unknown response');
+            log(`第 ${i + 1} 轮第 ${attempt} 次 ${why}，${r.blocked ? 300 : 800}ms 后重试（窗口至 ${new Date(deadline).toISOString().slice(11, 19)}）`);
+            await new Promise((r2) => setTimeout(r2, r.blocked ? 300 : 800));
           } catch (e) {
             log(`第 ${i + 1} 轮第 ${attempt} 次出错:`, e.message, '— 800ms 后重试');
             await new Promise((r2) => setTimeout(r2, 800));
@@ -299,5 +296,5 @@
     },
     stop() { running = false; log('手动停止'); },
   };
-  log('enroll-bot v9 已加载');
+  log('enroll-bot v10 已加载');
 })();

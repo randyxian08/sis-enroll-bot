@@ -6,7 +6,8 @@
 #   ./sis-bot.sh inject             注入抢课引擎 + 可视化面板
 #   ./sis-bot.sh dryrun             演练（验证链路，预期 blocked）
 #   ./sis-bot.sh start "SEM1时间" ["SEM2时间"]   定时开火
-#   ./sis-bot.sh status / stop      看日志 / 停止
+#   ./sis-bot.sh status / stop      看日志(末8行) / 停止
+#   ./sis-bot.sh log                导出完整日志到 logs/ 目录（复盘用）
 #
 # 捡漏（Add Classes 页面）:
 #   ./sis-bot.sh nav add            打开/定位 Add Classes 页面
@@ -80,6 +81,36 @@ case "$1" in
     wb "$CODE" sis-enroll ;;
   status) wb "window.__enrollBot ? window.__enrollBot.getLogs().slice(-8).join('\n') : 'bot not loaded'" sis-enroll ;;
   stop)   wb "window.__enrollBot.stop()" sis-enroll ;;
+  log)
+    # 导出完整日志到 logs/ 目录（复盘用）。注意：日志在页面内存里，刷新/关标签页即丢。
+    mkdir -p "$DIR/logs"
+    F="$DIR/logs/sis-$(date +%Y%m%d-%H%M%S).log"
+    python3 - "$F" <<'PYEOF'
+import json, sys, datetime, urllib.request
+out = open(sys.argv[1], 'w', encoding='utf-8')
+out.write("== SIS bot log snapshot @ %s ==\n" % datetime.datetime.now().isoformat())
+for session, expr, name in [
+    ('sis-enroll', "window.__enrollBot ? window.__enrollBot.getLogs().join('\\n') : 'enroll-bot not loaded'", 'ENROLL'),
+    ('sis-snipe',  "window.__snipeBot ? window.__snipeBot.getLogs().join('\\n') : 'snipe-bot not loaded'", 'SNIPE'),
+]:
+    body = json.dumps({'action': 'evaluate', 'args': {'code': expr}, 'session': session}).encode()
+    req = urllib.request.Request('http://127.0.0.1:10086/command', data=body, headers={'Content-Type': 'application/json'})
+    try:
+        resp = json.load(urllib.request.urlopen(req, timeout=60))
+        val = resp.get('data', {}).get('value', json.dumps(resp, ensure_ascii=False))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode('utf-8', 'replace')[:160]
+        except Exception:
+            detail = str(e)
+        val = '(该引擎未注入 / 会话无标签页: %s)' % detail
+    except Exception as e:
+        val = 'ERROR: %s' % e
+    out.write("\n===== %s =====\n%s\n" % (name, val))
+out.close()
+PYEOF
+    echo "已保存: $F ($(wc -l < "$F") 行)"
+    ;;
   check)
     T=$(targets_js "$2")
     wb "window.__snipeBot.check({targets:$T})" sis-snipe ;;

@@ -2,7 +2,10 @@
 // 依赖页面里已注入的 window.__enrollBot（抢课）和/或 window.__snipeBot（捡漏）
 // 注入后右下角出现面板；配置存 localStorage，刷新不丢。
 (function () {
-  if (window.__sisPanel) return;
+  if (window.__sisPanel) {
+    const old = document.getElementById('sis-bot-panel');
+    if (old) old.remove(); // 允许重复注入：刷新面板而不重复叠加
+  }
   window.__sisPanel = true;
 
   const CFG_KEY = 'sisBotCfg.v1';
@@ -11,6 +14,7 @@
     sem2: '2026-08-18T10:10',
     snipeTargets: '',        // 每行一个：课号,学期(1或2)
     intervalMs: 5000,
+    retrySec: 120,           // 抢课重试窗口（秒）：服务器晚开也能捕捉
     collapsed: false,
   }, JSON.parse(localStorage.getItem(CFG_KEY) || '{}'));
   const save = () => localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
@@ -76,6 +80,32 @@
 
   const $ = (s) => shadow.querySelector(s);
   const bd = $('#bd'), dot = $('#dot');
+
+  // ---------- 结果文案格式化（把原始 JSON 翻译成人话）----------
+  const esc = (s) => String(s).replace(/</g, '&lt;');
+  function fmtDryrun(r) {
+    if (!r) return '❓ 演练无返回';
+    if (r.blocked) return '✅ 演练通过：链路完整，流程已打通。<br><span class="mini">服务器在封窗期正常拒绝（outside course selection period），符合预期——等开闸后引擎会自动提交，无需再演练。</span>';
+    if (r.note) return '⚠️ ' + esc(r.note) + '<br><span class="mini">选课车为空时只能验证到学期选择这一步。</span>';
+    if (r.error) return '❌ 演练失败：' + esc(r.error);
+    return '❓ 演练结果异常：' + esc(JSON.stringify(r));
+  }
+  function fmtRounds(rs) {
+    const arr = Array.isArray(rs) ? rs : [rs];
+    if (!arr.length) return '（无轮次）';
+    return arr.map((r, i) => {
+      const rows = (r.results && r.results.rows) || [];
+      if (r.done) {
+        const ok = rows.filter((x) => x.status.includes('success')).length;
+        const err = rows.filter((x) => x.status.includes('error')).length;
+        return `第 ${i + 1} 轮：✅ 成功 ${ok} 门，失败 ${err} 门<span class="mini">（${esc(JSON.stringify(rows)).slice(0, 160)}）</span>`;
+      }
+      if (r.blocked) return `第 ${i + 1} 轮：⏳ 封窗期内未提交（重试窗口已结束）`;
+      if (r.error) return `第 ${i + 1} 轮：❌ ${esc(r.error)}`;
+      return `第 ${i + 1} 轮：${esc(JSON.stringify(r))}`;
+    }).join('<br>');
+  }
+
   $('#ver').textContent =
     (window.__enrollBot ? '抢课v' + window.__enrollBot.__v : '') +
     (window.__enrollBot && window.__snipeBot ? ' · ' : '') +
@@ -110,24 +140,26 @@
       bd.innerHTML = `
         <div class="row"><label>Sem 1 开闸</label><input type="datetime-local" id="t1" value="${cfg.sem1}"></div>
         <div class="row"><label>Sem 2 开闸</label><input type="datetime-local" id="t2" value="${cfg.sem2}"></div>
+        <div class="row"><label>重试窗口(s)</label><input type="number" id="rw" value="${cfg.retrySec}" min="30" step="30" title="开火后持续重试这么久，捕捉服务器晚开。担心晚开>2分钟就调大，如 300"></div>
         <div class="btns">
           <button class="ghost" id="dry">演 练</button>
           <button class="go" id="start">开始抢课</button>
           <button class="stop" id="stop">停止</button>
         </div>
         <div class="status" id="st">引擎${window.__enrollBot ? '就绪' : '<b style="color:#ff6961">未加载</b>（请在选课车页面注入）'}</div>
-        <div class="hint">到点自动：对表 → 预热连接 → 预封装请求 → 毫秒级提交。<br>Sem 1 成功后自动接 Sem 2。期间保持本标签页前台。</div>`;
+        <div class="hint">到点自动：对表 → 预热连接 → 预封装请求 → 毫秒级提交。<br>开火后持续重试「重试窗口」这么久（默认 120s），服务器晚开 1-2 分钟也能捕捉。期间保持本标签页前台。</div>`;
       $('#t1').onchange = (e) => { cfg.sem1 = e.target.value; save(); };
       $('#t2').onchange = (e) => { cfg.sem2 = e.target.value; save(); };
+      $('#rw').onchange = (e) => { cfg.retrySec = Math.max(30, +e.target.value || 120); save(); };
       if (!window.__enrollBot) { bd.querySelectorAll('.btns button').forEach((b) => { b.disabled = true; }); return; }
-      $('#dry').onclick = async () => { $('#st').textContent = '演练中…'; const r = await window.__enrollBot.dryRun(); $('#st').textContent = JSON.stringify(r); };
+      $('#dry').onclick = async () => { $('#st').innerHTML = '演练中…'; const r = await window.__enrollBot.dryRun(); $('#st').innerHTML = fmtDryrun(r); };
       $('#start').onclick = () => {
         const iso = (v) => new Date(v).toISOString();
-        $('#st').textContent = '已启动，等待开闸…';
+        $('#st').innerHTML = '已启动，等待开闸…<br><span class="mini">两轮并发调度：对表 → 预热 → 预封装 → 到点提交，开火后重试窗口 ' + cfg.retrySec + ' 秒。保持本页前台。</span>';
         window.__enrollBot.start({ rounds: [
-          { openTime: iso(cfg.sem1), term: 0 },
-          { openTime: iso(cfg.sem2), term: 1 },
-        ] }).then((r) => { $('#st').textContent = '结束: ' + JSON.stringify(r).slice(0, 200); });
+          { openTime: iso(cfg.sem1), term: 0, retryWindowMs: cfg.retrySec * 1000 },
+          { openTime: iso(cfg.sem2), term: 1, retryWindowMs: cfg.retrySec * 1000 },
+        ] }).then((r) => { $('#st').innerHTML = '结束：<br>' + fmtRounds(r); });
       };
       $('#stop').onclick = () => window.__enrollBot.stop();
     },
@@ -169,9 +201,33 @@
 
     log() {
       bd.innerHTML = `
-        <div class="btns"><button class="ghost" id="clr">清空显示</button><button class="ghost" id="cpy">复制全部</button></div>
-        <div class="status log" id="lg" style="max-height:340px"></div>`;
+        <div class="btns">
+          <button class="ghost" id="clr">清空显示</button>
+          <button class="ghost" id="cpy">复制全部</button>
+          <button class="go" id="exp">导出日志</button>
+        </div>
+        <div class="status log" id="lg" style="max-height:340px"></div>
+        <div class="status" id="st2" style="margin-top:6px;min-height:18px"></div>
+        <div class="hint">日志存在页面内存里，刷新/关闭标签页即丢失——复盘前务必点「导出日志」下载保存。</div>`;
       renderLogs(true);
+      $('#clr').onclick = () => { $('#lg').innerHTML = ''; $('#st2').textContent = '显示已清空（内存日志仍在）'; };
+      $('#cpy').onclick = () => {
+        navigator.clipboard.writeText(allLogs().join('\n')).then(
+          () => { $('#st2').textContent = '已复制'; },
+          () => { $('#st2').textContent = '复制失败（浏览器限制），用导出'; }
+        );
+      };
+      $('#exp').onclick = () => {
+        const text = allLogs().join('\n') + '\n';
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'sis-bot-' + new Date().toISOString().replace(/[:.]/g, '-') + '.log';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
+        $('#st2').textContent = '已触发下载（查看浏览器下载目录）';
+      };
     },
   };
 
