@@ -120,5 +120,32 @@ PYEOF
     wb "window.__snipeBot.start({targets:$T,intervalMs:$IV})" sis-snipe ;;
   snipe-status) wb "window.__snipeBot ? window.__snipeBot.getLogs().slice(-8).join('\n') : 'bot not loaded'" sis-snipe ;;
   snipe-stop)   wb "window.__snipeBot.stop()" sis-snipe ;;
+  watch)
+    # 看门狗：每 30s 检查引擎是否存活；页面被刷新/标签页崩溃会自动重新注入并重新武装
+    # 用法: ./sis-bot.sh watch "SEM1时间" "SEM2时间"   （开火当天挂后台: nohup ./sis-bot.sh watch ... &）
+    # 8/18 教训：用户三次误刷新/误停把引擎杀掉，全靠人工救火。有 watchdog 后 30s 内自愈。
+    T1="$2"; T2="$3"
+    [ -z "$T1" ] && { echo "用法: watch SEM1时间 SEM2时间"; exit 1; }
+    echo "[watch] 启动，每 30s 巡检。T1=$T1 T2=$T2"
+    while true; do
+      V=$(wb "window.__enrollBot ? window.__enrollBot.__v : 0" sis-enroll | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin); print(d['data']['value'] if d.get('ok') else 0)
+except Exception: print(0)" 2>/dev/null)
+      if [ "$V" = "0" ]; then
+        echo "[watch] $(date '+%H:%M:%S') 引擎丢失，重新注入+武装…"
+        nav sis-enroll "$CART_URL" >/dev/null 2>&1
+        sleep 8
+        wbfile sis-enroll "$ENROLL_BOT" "$PANEL" >/dev/null 2>&1
+        sleep 2
+        R=$(wb "window.__enrollBot.start({rounds:[{openTime:'$T1',term:0,retryWindowMs:900000},{openTime:'$T2',term:1,retryWindowMs:900000}]}); 'armed'" sis-enroll)
+        echo "[watch] $(date '+%H:%M:%S') $R"
+      else
+        echo "[watch] $(date '+%H:%M:%S') ok (v$V)"
+      fi
+      sleep 30
+    done
+    ;;
   *) echo "unknown command: $1"; exit 1;;
 esac

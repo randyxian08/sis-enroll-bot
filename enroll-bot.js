@@ -8,7 +8,7 @@
 // 设计：解析全部走 DOM（PeopleSoft 页面结构稳定，DOM 最不容易踩边界）；
 //       优化全在调度与网络层：亚秒时钟同步、连接池预热、请求体预封装、自旋精确定时。
 (function () {
-  if (window.__enrollBot && window.__enrollBot.__v === 10) return;
+  if (window.__enrollBot && window.__enrollBot.__v === 13) return;
 
   const frame = () => document.querySelector('#ptifrmtgtframe');
   const idoc = () => frame().contentDocument;
@@ -64,13 +64,20 @@
   }
 
   // ---------- 亚秒级时钟同步（Date 头秒翻转相位检测，±60ms）----------
+  // 服务器过载时 fetch 可能永久挂起：全部加 5s 超时，整体再加 15s 兜底
+  function headFetch() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    return fetch(origin + '/favicon.ico', { method: 'HEAD', cache: 'no-store', credentials: 'include', signal: ctrl.signal })
+      .finally(() => clearTimeout(timer));
+  }
   async function preciseSync() {
     const samples = [];
     let lastSec = null;
     const start = Date.now();
     while (Date.now() - start < 4500) {
       const t0 = performance.now();
-      const r = await fetch(origin + '/favicon.ico', { method: 'HEAD', cache: 'no-store', credentials: 'include' }).catch(() => null);
+      const r = await headFetch().catch(() => null);
       const t1 = performance.now();
       if (r) {
         const sec = Math.floor(new Date(r.headers.get('Date')).getTime() / 1000);
@@ -83,7 +90,8 @@
       await new Promise((r2) => setTimeout(r2, 120));
     }
     if (!samples.length) {
-      const r = await fetch(origin + '/favicon.ico', { method: 'HEAD', cache: 'no-store', credentials: 'include' });
+      const r = await headFetch().catch(() => null);
+      if (!r) return { offset: 0, accuracy: 2000 }; // 服务器濒死：放弃对时，靠重试窗口兜底
       return { offset: new Date(r.headers.get('Date')).getTime() - Date.now(), accuracy: 1000 };
     }
     samples.sort((a, b) => a - b);
@@ -93,7 +101,7 @@
   async function warmPool(n) {
     const jobs = [];
     for (let i = 0; i < (n || 3); i++) {
-      jobs.push(fetch(origin + '/favicon.ico', { method: 'HEAD', cache: 'no-store', credentials: 'include' }).catch(() => {}));
+      jobs.push(headFetch().catch(() => {}));
     }
     await Promise.all(jobs);
   }
@@ -142,29 +150,43 @@
   const pageText = (doc) => (doc.body ? doc.body.innerText.replace(/\s+/g, ' ') : '');
   const BLOCKED_RE = /CANNOT enroll during suspension|outside course selection period/i;
 
+  // 每次新鲜 GET 组件页：拿到服务端当前的 ICStateNum。
+  // 用实时页面的旧表单 POST 会因状态号过期被 PeopleSoft 打回启动页（innerText 全是 JS 源码）
+  async function freshDoc() {
+    const r = await fetch(frame().src, { credentials: 'include' });
+    return new DOMParser().parseFromString(await r.text(), 'text/html');
+  }
+
   // 确保在指定学期的选课车页（term: 0=Sem1, 1=Sem2）
   // 覆盖三种起始状态：已是该车 / 在 Select Term 页 / 在另一学期的车
   // 注意：学期选择不改共享 DOM（并发轮次会串台），而是直接覆盖提交参数
-  async function ensureTerm(doc, termIdx) {
+  // 学年自适应：按 "Sem N" 后缀匹配，不写死 2026-27，明年直接用
+  const TERM_RE = /\d{4}-\d{2} (Sem \d) \|/;
+  const onTermPage = (doc, want) => { const m = pageText(doc).match(TERM_RE); return m && m[1] === want; };
+  async function ensureTerm(_doc, termIdx) {
     const want = termIdx === 1 ? 'Sem 2' : 'Sem 1';
-    if (pageText(doc).includes('2026-27 ' + want + ' |')) return doc;
+    for (let retry = 0; retry < 3; retry++) {
+      let doc = await freshDoc();
+      if (onTermPage(doc, want)) return doc;
 
-    let radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
-    if (!radios.length) {
-      // 不在 Select Term 页 → 先点 Change Term 过去
-      log('切换学期到', want);
-      const change = findAction(doc, /change term/i, 'DERIVED_SSS_SCT_SSS_TERM_LINK');
-      if (!change) throw new Error('没找到 Change Term 按钮，当前页面: ' + pageText(doc).slice(0, 150));
-      doc = await post(doc, change);
-      radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
+      let radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
+      if (!radios.length) {
+        // 不在 Select Term 页 → 先点 Change Term 过去
+        log('切换学期到', want);
+        const change = findAction(doc, /change term/i, 'DERIVED_SSS_SCT_SSS_TERM_LINK');
+        if (!change) continue; // 响应异常，重新 GET
+        doc = await post(doc, change);
+        radios = doc.querySelectorAll('input[name="SSR_DUMMY_RECV1$sels$0"]');
+      }
+      if (!radios.length) continue;
+      log('选择', want);
+      const cont = findAction(doc, /continue/i, 'DERIVED_SSS_SCT_SSR_PB_GO');
+      if (!cont) continue;
+      doc = await post(doc, cont, { 'SSR_DUMMY_RECV1$sels$0': radios[termIdx].value });
+      if (onTermPage(doc, want)) return doc;
+      // 响应不符（状态号过期/服务器降级）→ 下一轮 for 重新 GET 拿新状态
     }
-    if (!radios.length) throw new Error('Select Term 页没找到学期选项');
-    log('选择', want);
-    const cont = findAction(doc, /continue/i, 'DERIVED_SSS_SCT_SSR_PB_GO');
-    if (!cont) throw new Error('Select Term 页没找到 Continue');
-    doc = await post(doc, cont, { 'SSR_DUMMY_RECV1$sels$0': radios[termIdx].value });
-    if (!pageText(doc).includes('2026-27 ' + want + ' |')) throw new Error('选学期后页面不符: ' + pageText(doc).slice(0, 150));
-    return doc;
+    throw new Error('ensureTerm 重试 3 次仍失败');
   }
 
   function parseResults(doc) {
@@ -203,7 +225,7 @@
   let running = false;
 
   window.__enrollBot = {
-    __v: 10,
+    __v: 13,
     lastLog: '',
     getLogs: () => logs.slice(),
     async warmup() { await warmPool(1); },
@@ -269,10 +291,18 @@
           try {
             const r = await fireRound(round, attempt === 1 ? prepared : null);
             if (r.done) {
-              const ok = r.results.rows.filter((x) => x.status.includes('success')).length;
-              const err = r.results.rows.filter((x) => x.status.includes('error')).length;
-              log(`第 ${i + 1} 轮完成! 开窗后 ${((Date.now() + offset) - T) / 1000}s 搞定。成功 ${ok} 门, 失败 ${err} 门`, JSON.stringify(r.results.rows).slice(0, 400));
-              return { round: i + 1, ...r };
+              const rows = r.results.rows;
+              const ok = rows.filter((x) => x.status.includes('success')).length;
+              const err = rows.filter((x) => x.status.includes('error')).length;
+              // 只有出现 success/error 才算落定；processing/wait list/空结果都是过渡页，继续重试
+              // （8/18 教训：Sem 2 在过渡页被判「完成」提前收工，3 门课留在车里）
+              if (ok + err > 0) {
+                log(`第 ${i + 1} 轮完成! 开窗后 ${((Date.now() + offset) - T) / 1000}s 搞定。成功 ${ok} 门, 失败 ${err} 门`, JSON.stringify(rows).slice(0, 400));
+                return { round: i + 1, ...r };
+              }
+              log(`第 ${i + 1} 轮第 ${attempt} 次结果是过渡页 (${rows.map((x) => x.status).join('/') || '无状态行'})，按未成交继续重试`);
+              await new Promise((r2) => setTimeout(r2, 800));
+              continue;
             }
             // blocked / 未识别文案 / 异常页：一律继续重试直到窗口结束，服务器晚开也能捕捉
             const why = r.blocked ? 'blocked' : (r.error ? r.error : 'unknown response');
@@ -296,5 +326,5 @@
     },
     stop() { running = false; log('手动停止'); },
   };
-  log('enroll-bot v10 已加载');
+  log('enroll-bot v13 已加载');
 })();

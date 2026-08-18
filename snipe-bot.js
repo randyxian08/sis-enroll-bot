@@ -10,7 +10,7 @@
 //       发现目标行为 Open 立刻走 Proceed to Step 2 → Finish Enrolling，与手动完全一致。
 //       同一学期的所有目标共享一次页面加载，10 门课和 1 门课开销相同。
 (function () {
-  if (window.__snipeBot && window.__snipeBot.__v === 1) return;
+  if (window.__snipeBot && window.__snipeBot.__v === 2) return;
 
   const frame = () => document.querySelector('#ptifrmtgtframe');
   const idoc = () => frame().contentDocument;
@@ -86,13 +86,17 @@
   const CLASS_NBR_FIELD = 'DERIVED_REGFRM1_CLASS_NBR$105$';
   const ENTER_ACTION = 'DERIVED_REGFRM1_SSR_PB_ADDTOLIST2$106$';
 
+  // 学年自适应：按 "Sem N" 后缀匹配，不写死学年
+  const TERM_RE = /\d{4}-\d{2} (Sem \d) \|/;
+  const onTerm = (txt, want) => { const m = txt.match(TERM_RE); return m && m[1] === want; };
+
   // 确保拿到指定学期 Add Classes 第 1 页的 doc
   async function getStep1Doc(termIdx) {
     const want = termIdx === 1 ? 'Sem 2' : 'Sem 1';
     let doc = idoc();
     const txt = pageText(doc);
     // 已在 Add Classes 第 1 页且学期正确
-    if (/Select classes to add/i.test(txt) && txt.includes('2026-27 ' + want + ' |')) return doc;
+    if (/Select classes to add/i.test(txt) && onTerm(txt, want)) return doc;
 
     if (doc.querySelector('input[name="SSR_DUMMY_RECV1$sels$0"]')) {
       // Select Term 页
@@ -179,7 +183,7 @@
   let stats = { cycles: 0, startedAt: null, fires: 0 };
 
   window.__snipeBot = {
-    __v: 1,
+    __v: 2,
     lastLog: '',
     stats,
     getLogs: () => logs.slice(),
@@ -270,5 +274,5 @@
     stop() { running = false; log('手动停止'); },
     isRunning: () => running,
   };
-  log('snipe-bot v1 已加载');
+  log('snipe-bot v2 已加载');
 })();

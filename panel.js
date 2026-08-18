@@ -161,7 +161,7 @@
           { openTime: iso(cfg.sem2), term: 1, retryWindowMs: cfg.retrySec * 1000 },
         ] }).then((r) => { $('#st').innerHTML = '结束：<br>' + fmtRounds(r); });
       };
-      $('#stop').onclick = () => window.__enrollBot.stop();
+      $('#stop').onclick = () => { if (confirm('确定停止抢课引擎？（开火前误停是 8/18 实战事故之一）')) window.__enrollBot.stop(); };
     },
 
     snipe() {
